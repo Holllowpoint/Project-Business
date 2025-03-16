@@ -173,7 +173,7 @@ class GameApp:
 
     def run_game(self):
         pg.init()
-        pg.display.set_caption("Enhanced Gamified Inventory Check")
+        pg.display.set_caption("Warehouse Explorer - Retro Edition")
         running = True
         font = pg.font.SysFont(None, 24)
         pg.mixer.music.play(-1)
