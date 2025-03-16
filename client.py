@@ -1,4 +1,4 @@
-import pygame as pg
+import pygame
 import sys
 import asyncio
 import websockets
@@ -10,264 +10,58 @@ import random
 import queue
 import time
 
-# FastAPI Backend URLs
+# Constants
 WEBSOCKET_URL = "ws://localhost:8000/ws"
 API_URL = "http://localhost:8000"
 
-# Global variables with thread-safe access
-items = {}
-items_lock = threading.Lock()
-player_scores = {}
-player_scores_lock = threading.Lock()
+# Colors
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+BROWN = (139, 69, 19)
+GRAY = (169, 169, 169)
+BLUE = (0, 0, 255)
+GREEN = (0, 255, 0)
+RED = (255, 0, 0)
+SKIN = (245, 222, 179)
+
+# Global queues and flag for thread communication
 update_queue = queue.Queue()
 position_queue = queue.Queue()
 collect_queue = queue.Queue()
-exit_flag = False  # Global flag to signal exit
+exit_flag = False
 
-# Player info
-PLAYER_ID = "Player1"  # Unique identifier for this player
+# Assign a unique player ID
+PLAYER_ID = "Player" + str(random.randint(1000, 9999))
 
-def send_collect_item(item_name):
-    """Send a request to collect an item to the backend."""
-    try:
-        response = requests.post(f"{API_URL}/collect-item/", json={"player": PLAYER_ID, "item": item_name})
-        print(response.json())
-    except requests.RequestException as e:
-        print(f"Error collecting item: {e}")
-
+# --- Communication Functions ---
 def send_position_update(x, y):
-    """Send player position to the backend."""
     try:
         requests.post(f"{API_URL}/update-position/", json={"player": PLAYER_ID, "x": x, "y": y})
     except requests.RequestException as e:
         print(f"Error updating position: {e}")
 
+def send_collect(crate_id):
+    try:
+        requests.post(f"{API_URL}/collect-item/", json={"player": PLAYER_ID, "item": crate_id})
+    except requests.RequestException as e:
+        print(f"Error collecting crate: {e}")
+
 def communication_thread_func():
-    """Handle sending position updates and item collection requests in a separate thread."""
     while not exit_flag:
         try:
             while not position_queue.empty():
                 x, y = position_queue.get()
                 send_position_update(x, y)
             while not collect_queue.empty():
-                item_name = collect_queue.get()
-                send_collect_item(item_name)
-            time.sleep(0.01)  # Small sleep to avoid busy waiting
+                crate_id = collect_queue.get()
+                send_collect(crate_id)
+            time.sleep(0.05)
         except Exception as e:
             print(f"Communication thread error: {e}")
 
-class Player:
-    def __init__(self, x, y, width, height, speed):
-        self.rect = pg.Rect(x, y, width, height)
-        self.speed = speed
-
-    def draw(self, screen):
-        # Draw head
-        pg.draw.circle(screen, (255, 255, 255), (self.rect.centerx, self.rect.y + 10), 10)
-        # Draw body
-        pg.draw.line(screen, (255, 255, 255), (self.rect.centerx, self.rect.y + 20), (self.rect.centerx, self.rect.y + 50), 2)
-        # Draw arms
-        pg.draw.line(screen, (255, 255, 255), (self.rect.centerx, self.rect.y + 30), (self.rect.centerx - 15, self.rect.y + 40), 2)
-        pg.draw.line(screen, (255, 255, 255), (self.rect.centerx, self.rect.y + 30), (self.rect.centerx + 15, self.rect.y + 40), 2)
-        # Draw legs
-        pg.draw.line(screen, (255, 255, 255), (self.rect.centerx, self.rect.y + 50), (self.rect.centerx - 10, self.rect.y + 70), 2)
-        pg.draw.line(screen, (255, 255, 255), (self.rect.centerx, self.rect.y + 50), (self.rect.centerx + 10, self.rect.y + 70), 2)
-
-    def move(self, keys, screen_width, screen_height):
-        if keys[pg.K_LEFT] and self.rect.x > 0:
-            self.rect.x -= self.speed
-        if keys[pg.K_RIGHT] and self.rect.x < screen_width - self.rect.width:
-            self.rect.x += self.speed
-        if keys[pg.K_UP] and self.rect.y > 0:
-            self.rect.y -= self.speed
-        if keys[pg.K_DOWN] and self.rect.y < screen_height - self.rect.height:
-            self.rect.y += self.speed
-
-class GameApp:
-    def __init__(self):
-        self.screen_width = 950
-        self.screen_height = 600
-        self.screen = pg.display.set_mode((self.screen_width, self.screen_height))
-        self.clock = pg.time.Clock()
-        self.player = Player(self.screen_width // 2 - 20, self.screen_height - 70, 40, 60, speed=5)  # Increased speed to 40
-        self.initial_player_rect = self.player.rect.copy()
-        try:
-            self.crate_image = pg.image.load("assets/crate.png").convert_alpha()
-        except FileNotFoundError:
-            self.crate_image = pg.Surface((20, 20))
-            self.crate_image.fill((139, 69, 19))
-        self.crate_image = pg.transform.scale(self.crate_image, (20, 20))
-        self.other_players = {}
-        self.inventory = {}
-        self.initial_crate_count = 0
-        self.start_time = time.time()
-        self.init_time = time.time()  # Time when game starts
-        self.crates_initialized = False  # Flag for crate initialization
-        self.last_fps_update = time.time()
-        self.display_fps = 0
-        self.last_position_send_time = time.time()
-        pg.mixer.init()
-        try:
-            pg.mixer.music.load("assets/Reflections on the Water.mp3")
-        except pg.error:
-            print("Music file not found. Using placeholder sound.")
-            pg.mixer.music.load(self.create_placeholder_sound())
-
-    def create_placeholder_sound(self):
-        import wave
-        import struct
-        filename = "assets/placeholder.wav"
-        sample_rate = 44100
-        duration = 5
-        frequency = 440
-        with wave.open(filename, 'w') as f:
-            f.setnchannels(1)
-            f.setsampwidth(2)
-            f.setframerate(sample_rate)
-            for i in range(sample_rate * duration):
-                value = int(32767.0 * 0.5 * (1 + (i // (sample_rate // 2)) % 2))
-                data = struct.pack('<h', value)
-                f.writeframesraw(data)
-        return filename
-
-    def generate_new_crate_position(self):
-        while True:
-            new_rect = pg.Rect(random.randint(50, self.screen_width - 50), random.randint(50, self.screen_height - 50), 20, 20)
-            overlaps = False
-            with items_lock:
-                for item_name, rect_list in items.items():
-                    for rect, _ in rect_list:
-                        if new_rect.colliderect(rect):
-                            overlaps = True
-                            break
-                    if overlaps:
-                        break
-            if not overlaps and not new_rect.colliderect(self.initial_player_rect):
-                return new_rect
-
-    def check_item_collection(self):
-        with items_lock:
-            items_copy = {item_name: [(rect, collected) for rect, collected in rect_list] for item_name, rect_list in items.items()}
-        for item_name, rect_list in items_copy.items():
-            for rect, collected in rect_list:
-                if not collected and self.player.rect.colliderect(rect):
-                    collect_queue.put(item_name)
-                    with items_lock:
-                        for i, (r, c) in enumerate(items[item_name]):
-                            if r == rect:
-                                items[item_name][i] = (r, True)
-                    break
-
-    def update_from_queue(self):
-        while not update_queue.empty():
-            data = update_queue.get()
-            print("Received server data:", data)  # Debug print
-            inv_data = data.get("inventory", {})
-            with items_lock:
-                for item_name, count in inv_data.items():
-                    if count > 0:
-                        if item_name not in items:
-                            items[item_name] = [(self.generate_new_crate_position(), False) for _ in range(count)]
-                            print(f"Added {count} {item_name} from server.")
-                        self.crates_initialized = True
-
-    def run_game(self):
-        pg.init()
-        pg.display.set_caption("Warehouse Explorer - Retro Edition")
-        running = True
-        font = pg.font.SysFont(None, 24)
-        pg.mixer.music.play(-1)
-        while running:
-            for event in pg.event.get():
-                if event.type == pg.QUIT:
-                    running = False
-                    pg.mixer.music.fadeout(1000)
-                    global exit_flag
-                    exit_flag = True
-                    pg.quit()
-                    sys.exit()
-
-            keys = pg.key.get_pressed()
-            self.player.move(keys, self.screen_width, self.screen_height)
-
-            current_time = time.time()
-            if current_time - self.last_position_send_time > 0.1:
-                position_queue.put((self.player.rect.x, self.player.rect.y))
-                self.last_position_send_time = current_time
-
-            # Fallback mechanism: spawn default crates if no data received within 5 seconds
-            if current_time - self.init_time > 5 and not self.crates_initialized:
-                print("Triggering fallback to spawn crates.")  # Debug print
-                with items_lock:
-                    items["crates"] = [(pg.Rect(random.randint(50, self.screen_width - 50), random.randint(50, self.screen_height - 50), 20, 20), False) for _ in range(10)]
-                self.initial_crate_count = 10
-                self.crates_initialized = True
-                print("Number of crates added:", len(items["crates"]))  # Debug print
-
-            self.check_item_collection()
-            self.update_from_queue()
-
-            self.screen.fill((0, 0, 0))
-            self.player.draw(self.screen)
-
-            for player_id, rect in self.other_players.items():
-                pg.draw.rect(self.screen, (0, 255, 0), rect, 2)
-
-            with items_lock:
-                items_copy = {item_name: [(rect, collected) for rect, collected in rect_list] for item_name, rect_list in items.items()}
-            print("Current items:", items_copy)  # Debug print
-            for item_name, rect_list in items_copy.items():
-                image = self.crate_image
-                for rect, collected in rect_list:
-                    if collected:
-                        dimmed_image = image.copy()
-                        dimmed_image.set_alpha(100)
-                        self.screen.blit(dimmed_image, rect)
-                    else:
-                        self.screen.blit(image, rect)
-
-            if current_time - self.last_fps_update >= 5:
-                self.display_fps = self.clock.get_fps()
-                self.last_fps_update = current_time
-
-            time_remaining = max(0, 30 - (current_time - self.start_time))
-            with player_scores_lock:
-                score = player_scores.get(PLAYER_ID, 0)
-            crates_left = self.inventory.get("crates", 0)
-            game_over = False
-            result_text = None
-
-            if time_remaining <= 0:
-                game_over = True
-                if crates_left == 0 and score == self.initial_crate_count * 10:
-                    result_text = font.render("You Win!", True, (0, 255, 0))
-                else:
-                    result_text = font.render("Game Over", True, (255, 0, 0))
-
-            # Display game info
-            score_text = font.render(f"Score: {score}", True, (255, 255, 255))
-            crates_text = font.render(f"Crates: {crates_left}", True, (255, 255, 255))
-            fps_text = font.render(f"FPS: {self.display_fps:.1f}", True, (255, 255, 255))
-            timer_text = font.render(f"Time: {time_remaining:.1f}s", True, (255, 255, 255))
-            self.screen.blit(score_text, (10, 10))
-            self.screen.blit(crates_text, (10, 40))
-            self.screen.blit(fps_text, (10, 70))
-            self.screen.blit(timer_text, (10, 100))
-            if game_over and result_text:
-                self.screen.blit(result_text, (self.screen_width // 2 - 50, self.screen_height // 2))
-
-            pg.display.flip()
-            self.clock.tick(60)  # Ensure consistent 60 FPS
-
-            if game_over:
-                pg.mixer.music.fadeout(1000)
-                pg.time.wait(2000)
-                running = False
-        pg.quit()
-
+# --- WebSocket Client ---
 async def connect_to_server():
-    """Connect to the WebSocket server and update game state."""
-    global player_scores, exit_flag
+    global exit_flag
     backoff = 5
     while not exit_flag:
         try:
@@ -275,42 +69,194 @@ async def connect_to_server():
                 backoff = 5
                 while not exit_flag:
                     data = await websocket.recv()
-                    data_json = loads(data)
-                    with player_scores_lock:
-                        player_scores.update(data_json.get("scores", {}))
-                    update_queue.put(data_json)
-        except websockets.exceptions.WebSocketException as e:
+                    update_queue.put(loads(data))
+        except Exception as e:
             if exit_flag:
                 break
-            print(f"Websockets error: {e}")
+            print(f"WebSocket error: {e}")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
 
-def run_game_app():
-    """Run the Pygame application."""
-    game_app = GameApp()
-    game_app.run_game()
+# --- Game Classes and Functions ---
+class Player:
+    def __init__(self, x, y, speed=5):
+        self.x = x
+        self.y = y
+        self.speed = speed
+        self.held_item = None
 
-async def main():
-    """Run Pygame in a thread and WebSocket in the main thread after verifying server connection."""
-    # Check if server is reachable before starting
-    try:
-        async with websockets.connect(WEBSOCKET_URL):
-            print("Server is reachable.")
-    except websockets.exceptions.WebSocketException as e:
-        print(f"Cannot connect to server: {e}")
-        print("Please start the server and try again.")
-        sys.exit(1)
+    def get_rect(self):
+        return pygame.Rect(self.x - 15, self.y - 12, 30, 50)
 
-    # Start communication thread for non-blocking server requests
-    communication_thread = threading.Thread(target=communication_thread_func, daemon=True)
-    communication_thread.start()
+    def move(self, keys, screen_width, screen_height):
+        if keys[pygame.K_LEFT]:
+            self.x = max(30, self.x - self.speed)
+        if keys[pygame.K_RIGHT]:
+            self.x = min(screen_width - 30, self.x + self.speed)
+        if keys[pygame.K_UP]:
+            self.y = max(30, self.y - self.speed)
+        if keys[pygame.K_DOWN]:
+            self.y = min(screen_height - 30, self.y + self.speed)
 
-    # Start game thread and WebSocket connection
-    game_thread = threading.Thread(target=run_game_app, daemon=False)
-    game_thread.start()
-    await connect_to_server()
-    game_thread.join()
+def draw_player(screen, x, y, frame):
+    # Head and face
+    pygame.draw.circle(screen, SKIN, (x, y), 12)
+    pygame.draw.circle(screen, BLACK, (x - 4, y - 2), 2)
+    pygame.draw.circle(screen, BLACK, (x + 4, y - 2), 2)
+    pygame.draw.line(screen, RED, (x - 4, y + 4), (x + 4, y + 4), 2)
+    # Body with breathing animation
+    body_height = 30 + (2 if frame % 20 < 10 else 0)
+    pygame.draw.rect(screen, BLUE, (x - 8, y + 12, 16, body_height - 12))
+    # Arms animation
+    if frame % 20 < 10:
+        pygame.draw.line(screen, SKIN, (x - 8, y + 15), (x - 20, y + 30), 3)
+        pygame.draw.line(screen, SKIN, (x + 8, y + 15), (x + 20, y + 30), 3)
+    else:
+        pygame.draw.line(screen, SKIN, (x - 8, y + 15), (x - 15, y + 25), 3)
+        pygame.draw.line(screen, SKIN, (x + 8, y + 15), (x + 15, y + 25), 3)
+    # Legs animation
+    if frame % 20 < 10:
+        pygame.draw.line(screen, BLACK, (x - 4, y + body_height), (x - 12, y + 50), 3)
+        pygame.draw.line(screen, BLACK, (x + 4, y + body_height), (x + 12, y + 50), 3)
+    else:
+        pygame.draw.line(screen, BLACK, (x - 4, y + body_height), (x - 8, y + 50), 3)
+        pygame.draw.line(screen, BLACK, (x + 4, y + body_height), (x + 16, y + 50), 3)
+
+def draw_warehouse(screen, width, height):
+    screen.fill(GRAY)
+    # Walls
+    pygame.draw.rect(screen, BLACK, (0, 0, width, 20))
+    pygame.draw.rect(screen, BLACK, (0, height - 20, width, 20))
+    pygame.draw.rect(screen, BLACK, (0, 0, 20, height))
+    pygame.draw.rect(screen, BLACK, (width - 20, 0, 20, height))
+    # Floor pattern
+    for i in range(0, width, 40):
+        for j in range(0, height, 40):
+            pygame.draw.rect(screen, GREEN, (i, j, 20, 20), 1)
+
+def draw_menu(screen, font, menu_options, selected_option, username, signed_in):
+    screen.fill(BLACK)
+    title = font.render("WAREHOUSE EXPLORER", True, WHITE)
+    screen.blit(title, (400 - title.get_width()//2, 100))
+    for i, option in enumerate(menu_options):
+        color = WHITE if i == selected_option else GRAY
+        text = font.render(option, True, color)
+        screen.blit(text, (400 - text.get_width()//2, 250 + i * 50))
+    if signed_in:
+        welcome = font.render(f"Welcome, {username}!", True, WHITE)
+        screen.blit(welcome, (400 - welcome.get_width()//2, 450))
+
+def main():
+    global exit_flag
+    pygame.init()
+    screen_width = 800
+    screen_height = 600
+    screen = pygame.display.set_mode((screen_width, screen_height))
+    pygame.display.set_caption("Warehouse Explorer - Retro Edition")
+    clock = pygame.time.Clock()
+    font = pygame.font.Font(None, 36)
+
+    menu_options = ["Sign In", "Start Game", "Quit"]
+    selected_option = 0
+    in_menu = True
+    signed_in = False
+    username = ""
+    player = Player(screen_width//2, screen_height//2)
+    animation_frame = 0
+
+    # Start communication thread (for REST API calls)
+    comm_thread = threading.Thread(target=communication_thread_func, daemon=True)
+    comm_thread.start()
+
+    # Start websocket connection in an asyncio thread
+    loop = asyncio.new_event_loop()
+    asyncio_thread = threading.Thread(target=loop.run_until_complete, args=(connect_to_server(),), daemon=True)
+    asyncio_thread.start()
+
+    # Local state for crates received from the server
+    crates = {}  # { crate_id: {"x":, "y":, "state":, "player":} }
+    
+    # Define delivery zone (for delivering carried crates)
+    delivery_zone = pygame.Rect(400, 500, 100, 50)
+
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+                exit_flag = True
+            if in_menu:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_UP:
+                        selected_option = (selected_option - 1) % len(menu_options)
+                    elif event.key == pygame.K_DOWN:
+                        selected_option = (selected_option + 1) % len(menu_options)
+                    elif event.key == pygame.K_RETURN:
+                        if selected_option == 0 and not signed_in:
+                            username = PLAYER_ID  # auto assign ID
+                            signed_in = True
+                        elif selected_option == 1 and signed_in:
+                            in_menu = False
+                        elif selected_option == 2:
+                            running = False
+            else:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        in_menu = True
+                    elif event.key == pygame.K_SPACE:
+                        # Attempt to pick up a nearby crate
+                        player_rect = player.get_rect()
+                        for crate_id, crate in crates.items():
+                            crate_rect = pygame.Rect(crate["x"], crate["y"], 40, 40)
+                            if crate["state"] == "on_floor" and player_rect.colliderect(crate_rect):
+                                player.held_item = crate_id
+                                collect_queue.put(crate_id)
+                                break
+                    elif event.key == pygame.K_d:
+                        # Deliver held crate if within the delivery zone
+                        if player.held_item and player.get_rect().colliderect(delivery_zone):
+                            collect_queue.put(player.held_item)  # Deliver crate
+                            player.held_item = None
+
+        if in_menu:
+            draw_menu(screen, font, menu_options, selected_option, username, signed_in)
+        else:
+            keys = pygame.key.get_pressed()
+            player.move(keys, screen_width, screen_height)
+            # Send position updates periodically
+            position_queue.put((player.x, player.y))
+            # Update local crates data from the websocket updates
+            while not update_queue.empty():
+                data = update_queue.get()
+                crates = data.get("crates", {})
+
+            animation_frame += 1
+
+            draw_warehouse(screen, screen_width, screen_height)
+            # Draw delivery zone
+            pygame.draw.rect(screen, GREEN, delivery_zone)
+            delivery_text = font.render("Delivery", True, BLACK)
+            screen.blit(delivery_text, (delivery_zone.centerx - delivery_text.get_width()//2, delivery_zone.centery - 10))
+
+            # Draw crates
+            for crate in crates.values():
+                if crate["state"] == "on_floor":
+                    pygame.draw.rect(screen, BROWN, (crate["x"], crate["y"], 40, 40))
+                elif crate["state"] == "carried" and crate["player"] == PLAYER_ID and player.held_item:
+                    pygame.draw.rect(screen, BROWN, (player.x - 20, player.y - 40, 40, 40))
+
+            # Draw player
+            draw_player(screen, player.x, player.y, animation_frame)
+            # Display held item info
+            inv_text = font.render(f"Held: {player.held_item if player.held_item else 'None'}", True, WHITE)
+            screen.blit(inv_text, (10, 10))
+
+        pygame.display.flip()
+        clock.tick(30)
+
+    pygame.quit()
+    sys.exit()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+# Run with: python client.py
