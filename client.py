@@ -163,31 +163,13 @@ class GameApp:
             data = update_queue.get()
             print("Received server data:", data)  # Debug print
             inv_data = data.get("inventory", {})
-            positions = data.get("positions", {})
             with items_lock:
                 for item_name, count in inv_data.items():
                     if count > 0:
-                        if item_name in items:
-                            current_rects = [rect for rect, _ in items[item_name]]
-                            current_uncollected = sum(1 for _, c in items[item_name] if not c)
-                            if current_uncollected > count:
-                                items[item_name] = [(r, c) for r, c in items[item_name] if c][:count]
-                            elif current_uncollected < count:
-                                for _ in range(count - current_uncollected):
-                                    new_rect = self.generate_new_crate_position()
-                                    items[item_name].append((new_rect, False))
-                        else:
+                        if item_name not in items:
                             items[item_name] = [(self.generate_new_crate_position(), False) for _ in range(count)]
-                            if not self.initial_crate_count:
-                                self.initial_crate_count = count
-                    else:
-                        if item_name in items:
-                            del items[item_name]
-            for player_id, pos in positions.items():
-                if player_id != PLAYER_ID:
-                    self.other_players[player_id] = pg.Rect(pos["x"], pos["y"], 40, 60)
-            self.inventory = inv_data
-            self.crates_initialized = True  # Set when server data is received
+                            print(f"Added {count} {item_name} from server.")
+                        self.crates_initialized = True
 
     def run_game(self):
         pg.init()
